@@ -1,0 +1,17 @@
+{
+  "name": "endroid-bot",
+  "version": "1.0.0",
+  "description": "Modular WhatsApp bot with cog system",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "auth": "node auth.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "pino": "^8.17.2"
+  },
+  "keywords": ["whatsapp-bot", "baileys", "modular"],
+  "author": "Endroid",
+  "license": "MIT"
+}
