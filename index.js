@@ -1,60 +1,102 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const fs = require('fs');
-const readline = require('readline');
+const Pino = require('pino');
 
-// Simple input function
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-const ask = (q) => new Promise((resolve) => rl.question(q, resolve));
+// Bot settings
+const prefix = '!';
+const botName = 'Endroid Bot';
 
-// Auto-load all cogs (files starting with letter + ending with .js)
-const cogs = new Map();
-const cogFiles = fs.readdirSync('./cogs').filter(f => /^[a-zA-Z].*\.js$/.test(f));
+// Load session from environment variable
+const sessionBase64 = process.env.SESSION_ID;
 
-for (const file of cogFiles) {
-    const cog = require(`./cogs/${file}`);
-    cogs.set(cog.name, cog);
-    console.log(`✅ Loaded cog: ${cog.name}`);
+if (!sessionBase64) {
+    console.error('❌ SESSION_ID environment variable not set!');
+    console.error('📋 Generate one using a session generator website or auth.js');
+    process.exit(1);
 }
-console.log(`📦 Total cogs loaded: ${cogs.size}\n`);
 
-// Bot settings (edit these or change via commands later)
-let prefix = '!';
-let botName = 'Endroid Bot';
+// Create auth folder and convert session
+if (!fs.existsSync('./auth')) fs.mkdirSync('./auth');
+
+try {
+    // Try to parse as-is (in case it's already valid JSON)
+    let credsJson;
+    if (sessionBase64.startsWith('{')) {
+        credsJson = sessionBase64;
+    } else {
+        // Remove any bot name prefix if present (e.g., "BotName:base64data")
+        const cleanBase64 = sessionBase64.includes(':') 
+            ? sessionBase64.split(':').pop() 
+            : sessionBase64;
+        credsJson = Buffer.from(cleanBase64, 'base64').toString('utf-8');
+    }
+    fs.writeFileSync('./auth/creds.json', credsJson);
+    console.log('✅ Session loaded successfully');
+} catch (err) {
+    console.error('❌ Failed to parse SESSION_ID:', err.message);
+    console.error('📋 Make sure you copied the entire session string correctly');
+    process.exit(1);
+}
+
+// Auto-load all cogs
+const cogs = new Map();
+if (fs.existsSync('./cogs')) {
+    const cogFiles = fs.readdirSync('./cogs').filter(f => /^[a-zA-Z].*\.js$/.test(f));
+    for (const file of cogFiles) {
+        try {
+            const cog = require(`./cogs/${file}`);
+            cogs.set(cog.name, cog);
+            console.log(`📦 Loaded cog: ${cog.name}`);
+        } catch (err) {
+            console.error(`❌ Failed to load cog ${file}:`, err.message);
+        }
+    }
+    console.log(`📚 Total cogs loaded: ${cogs.size}\n`);
+} else {
+    fs.mkdirSync('./cogs');
+    console.log('📁 Created "cogs" folder. Add your commands there.\n');
+}
 
 async function start() {
     const { state, saveCreds } = await useMultiFileAuthState('auth');
     
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false
+        printQRInTerminal: false,
+        defaultQueryTimeoutMs: undefined,
+        keepAliveIntervalMs: 30000,
+        logger: Pino({ level: 'silent' }) // Reduces noise
     });
 
     sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
-        
-        // Get pairing code
-        if (connection === 'connecting' && !sock.authState.creds.registered) {
-            const number = await ask('📱 Enter your phone number (country code + number, no + or spaces): ');
-            const clean = number.replace(/\D/g, '');
-            console.log('🔑 Requesting pairing code...');
-            const code = await sock.requestPairingCode(clean);
-            console.log(`\n⭐ YOUR PAIRING CODE: ${code} ⭐`);
-            console.log('📲 Go to WhatsApp > Settings > Linked Devices > Link with phone number instead\n');
-        }
+        const { connection, lastDisconnect, qr } = update;
         
         if (connection === 'open') {
-            console.log('✅ Bot connected! Ready to use.');
-            rl.close();
+            console.log('\n' + '='.repeat(50));
+            console.log(`✅ ${botName} is ONLINE and connected!`);
+            console.log(`📱 Prefix: ${prefix}`);
+            console.log(`🎯 Commands: ${Array.from(cogs.keys()).join(', ') || 'No cogs loaded'}`);
+            console.log(`⏰ Time: ${new Date().toLocaleString()}`);
+            console.log('='.repeat(50) + '\n');
+            
+            // Send a test message to yourself (optional - uncomment if you want)
+            // const ownerJid = 'YOUR_NUMBER@s.whatsapp.net';
+            // await sock.sendMessage(ownerJid, { text: `🤖 *${botName}* is now online!` });
         }
         
         if (connection === 'close') {
-            const reason = lastDisconnect?.error?.output?.statusCode;
-            if (reason !== DisconnectReason.loggedOut) {
-                console.log('🔄 Reconnecting...');
-                start();
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            if (statusCode !== DisconnectReason.loggedOut) {
+                console.log(`⚠️ Connection closed. Reconnecting in 5 seconds... (Code: ${statusCode})`);
+                setTimeout(start, 5000);
             } else {
-                console.log('❌ Logged out. Delete "auth" folder and restart.');
+                console.log('❌ Logged out! Generate a new SESSION_ID.');
+                process.exit(1);
             }
+        }
+        
+        if (qr) {
+            console.log('📱 QR Code received (should not happen with pairing code)');
         }
     });
 
@@ -71,10 +113,11 @@ async function start() {
         
         if (cogs.has(command)) {
             try {
+                console.log(`📨 Command: ${command} from ${msg.key.remoteJid}`);
                 await cogs.get(command).run(sock, msg, args, { prefix, botName });
             } catch (err) {
-                console.error('Command error:', err);
-                await sock.sendMessage(msg.key.remoteJid, { text: '❌ Error executing command' });
+                console.error(`❌ Error in ${command}:`, err);
+                await sock.sendMessage(msg.key.remoteJid, { text: '❌ Command failed' }).catch(() => {});
             }
         }
     });
@@ -82,6 +125,10 @@ async function start() {
     sock.ev.on('creds.update', saveCreds);
 }
 
-// Create cogs folder if it doesn't exist
-if (!fs.existsSync('./cogs')) fs.mkdirSync('./cogs');
+// Graceful shutdown
+process.on('SIGINT', async () => {
+    console.log('\n🛑 Shutting down...');
+    process.exit(0);
+});
+
 start();
